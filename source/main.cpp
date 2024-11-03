@@ -1,5 +1,9 @@
 #include "starter.h"
 #include <iostream>
+#include <time.h>
+#include <deque>
+#include <math.h>
+#include <fstream>
 
 // sounds
 #include <maxmod9.h>
@@ -15,9 +19,15 @@
 #include "uvcoord_font_si.h"
 #include "uvcoord_font_16x16.h"
 
-// some useful defines
+// nds resolution is 256 × 192 in both screens
 #define HALF_WIDTH (SCREEN_WIDTH / 2)
 #define HALF_HEIGHT (SCREEN_HEIGHT / 2)
+
+const int CELL_SIZE = 8;
+const int CELL_COUNT = 24;
+
+const int SCREEN_WIDTH_SNAKE = CELL_SIZE * CELL_COUNT;
+const int SCREEN_HEIGHT_SNAKE = CELL_SIZE * CELL_COUNT;
 
 // This imageset would use our texture packer generated coords so it's kinda
 // safe and easy to use
@@ -38,100 +48,230 @@ const int BLUE = RGB15(0, 0, 255);
 
 bool isGamePaused;
 
-int collisionCounter;
+int score;
+int highScore;
 
-Rectangle player = {HALF_WIDTH, HALF_HEIGHT, 32, 32, WHITE};
-Rectangle bottomBounds = {HALF_WIDTH, HALF_HEIGHT, 32, 32, GREEN};
-Rectangle ball = {HALF_WIDTH - 50, HALF_HEIGHT, 20, 20, WHITE};
-Rectangle touchBounds = {0, 0, 8, 8, WHITE};
-
-const int PLAYER_SPEED = 5;
-
-int ballVelocityX = 2;
-int ballVelocityY = 2;
-
-void update()
+typedef struct
 {
-	int keyHeld = keysHeld();
+	int x;
+	int y;
+} Vector2;
 
-	if (keyHeld & KEY_UP && player.y > 0)
+typedef struct
+{
+	int cellCount;
+	int cellSize;
+	std::deque<Vector2> body;
+	Vector2 direction;
+	bool shouldAddSegment;
+} Snake;
+
+Snake snake;
+
+typedef struct
+{
+	int cellCount;
+	int cellSize;
+	Vector2 position;
+	bool isDestroyed;
+} Food;
+
+Food food;
+
+Rectangle foodBounds;
+
+int rand_range(int min, int max)
+{
+	return min + rand() / (RAND_MAX / (max - min + 1) + 1);
+}
+
+Vector2 generateRandomPosition()
+{
+	int positionX = rand_range(0, CELL_COUNT - 1);
+	int positionY = rand_range(0, CELL_COUNT - 1);
+
+	return Vector2{positionX, positionY};
+}
+
+Vector2 vector2Add(Vector2 vector1, Vector2 vector2)
+{
+	Vector2 result = {vector1.x + vector2.x, vector1.y + vector2.y};
+
+	return result;
+}
+
+int vector2Equals(Vector2 vector1, Vector2 vector2)
+{
+	const float EPSILON = 0.000001f;
+	int result = ((fabsf(vector1.x - vector2.x)) <= (EPSILON * fmaxf(1.0f, fmaxf(fabsf(vector1.x), fabsf(vector2.x))))) &&
+				 ((fabsf(vector1.y - vector2.y)) <= (EPSILON * fmaxf(1.0f, fmaxf(fabsf(vector1.y), fabsf(vector2.y)))));
+
+	return result;
+}
+
+double lastUpdateTime = 0;
+
+bool eventTriggered(int counter)
+{
+	lastUpdateTime += counter;
+
+	// wait 0.2 seconds.
+	if (lastUpdateTime >= 100)
 	{
-		player.y -= PLAYER_SPEED;
+		lastUpdateTime = 0;
+
+		return true;
 	}
 
-	else if (keyHeld & KEY_DOWN && player.y < SCREEN_HEIGHT - player.h)
+	return false;
+}
+
+void saveScore()
+{
+	std::string path = "high-score.txt";
+
+	std::ofstream highScores(path);
+
+	std::string scoreString = std::to_string(score);
+	highScores << scoreString;
+
+	highScores.close();
+}
+
+int loadHighScore()
+{
+	std::string highScoreText;
+
+	std::string path = "high-score.txt";
+
+	std::ifstream highScores(path);
+
+	if (!highScores.is_open())
 	{
-		player.y += PLAYER_SPEED;
+		saveScore();
+
+		std::ifstream auxHighScores(path);
+
+		getline(auxHighScores, highScoreText);
+
+		highScores.close();
+
+		int highScore = stoi(highScoreText);
+
+		return highScore;
 	}
 
-	else if (keyHeld & KEY_RIGHT && player.x < SCREEN_WIDTH - player.w)
+	getline(highScores, highScoreText);
+
+	highScores.close();
+
+	int highScore = stoi(highScoreText);
+
+	return highScore;
+}
+
+void resetSnakePosition()
+{
+	// highScore = loadHighScore();
+
+	if (score > highScore)
 	{
-		player.x += PLAYER_SPEED;
+		highScore = score;
+		saveScore();
 	}
 
-	else if (keyHeld & KEY_LEFT && player.x > 0)
+	snake.body = {{6, 9}, {5, 9}, {4, 9}};
+	snake.direction = {1, 0};
+
+	score = 0;
+}
+
+bool checkCollisionWithFood(Vector2 foodPosition)
+{
+	if (vector2Equals(snake.body[0], foodPosition))
 	{
-		player.x -= PLAYER_SPEED;
-	}
-
-	if (ball.x < 0 || ball.x > SCREEN_WIDTH - ball.w)
-	{
-		ballVelocityX *= -1;
-
-		ball.color = GREEN;
-
 		mmEffectEx(&collisionSound);
+
+		snake.shouldAddSegment = true;
+		return true;
 	}
 
-	else if (ball.y < 0 || ball.y > SCREEN_HEIGHT - ball.h)
+	return false;
+}
+
+void checkCollisionWithEdges()
+{
+	if (snake.body[0].x == CELL_COUNT || snake.body[0].x == -1 || snake.body[0].y == CELL_COUNT || snake.body[0].y == -1)
 	{
-		ballVelocityY *= -1;
-
-		ball.color = RED;
-
-		mmEffectEx(&collisionSound);
+		resetSnakePosition();
 	}
+}
 
-	else if (hasCollision(player, ball))
+void checkCollisionBetweenHeadAndBody()
+{
+	for (size_t i = 1; i < snake.body.size(); i++)
 	{
-		ballVelocityX *= -1;
-		ballVelocityY *= -1;
+		if (vector2Equals(snake.body[0], snake.body[i]))
+		{
+			resetSnakePosition();
+		}
+	}
+}
 
-		ball.color = BLUE;
+int counter = 0;
 
-		collisionCounter++;
+void update(int keyDown)
+{
+	counter++;
 
-		// Play collision sound effect
-		mmEffectEx(&collisionSound);
+	if (eventTriggered(counter))
+	{
+		counter = 0;
+		if (!snake.shouldAddSegment)
+		{
+			snake.body.pop_back();
+			snake.body.push_front(vector2Add(snake.body[0], snake.direction));
+		}
+		else
+		{
+			snake.body.push_front(vector2Add(snake.body[0], snake.direction));
+			snake.shouldAddSegment = false;
+		}
 	}
 
-	ball.x += ballVelocityX;
-	ball.y += ballVelocityY;
+	if (keyDown & KEY_UP && snake.direction.y != 1)
+	{
+		snake.direction = {0, -1};
+	}
+
+	else if (keyDown & KEY_DOWN && snake.direction.y != -1)
+	{
+		snake.direction = {0, 1};
+	}
+
+	else if (keyDown & KEY_LEFT && snake.direction.x != 1)
+	{
+		snake.direction = {-1, 0};
+	}
+
+	else if (keyDown & KEY_RIGHT && snake.direction.x != -1)
+	{
+		snake.direction = {1, 0};
+	}
+
+	checkCollisionWithEdges();
+	checkCollisionBetweenHeadAndBody();
+
+	food.isDestroyed = checkCollisionWithFood(food.position);
+
+	if (food.isDestroyed)
+	{
+		food.position = generateRandomPosition();
+		score++;
+	}
 }
 
 void renderTopScreen()
-{
-	lcdMainOnTop();
-	vramSetBankD(VRAM_D_LCD);
-	vramSetBankC(VRAM_C_SUB_BG);
-	REG_DISPCAPCNT = DCAP_BANK(3) | DCAP_ENABLE | DCAP_SIZE(3);
-
-	glBegin2D();
-
-	drawRectangle(player);
-	drawRectangle(ball);
-
-	if (isGamePaused)
-	{
-		// change fontsets and  print some spam
-		glColor(RGB15(0, 31, 31));
-		Font.PrintCentered(0, 20, "GAME PAUSED");
-	}
-
-	glEnd2D();
-}
-
-void renderBottomScreen()
 {
 	lcdMainOnBottom();
 	vramSetBankC(VRAM_C_LCD);
@@ -140,61 +280,83 @@ void renderBottomScreen()
 
 	glBegin2D();
 
-	drawRectangle(bottomBounds);
+	for (size_t i = 0; i < snake.body.size(); i++)
+	{
+		int positionX = snake.body[i].x;
+		int positionY = snake.body[i].y;
+
+		Rectangle bodyBounds = {(float)positionX * CELL_SIZE,(float) positionY * CELL_SIZE, CELL_SIZE, CELL_SIZE, WHITE};
+
+		drawRectangle(bodyBounds);
+	}
+
+	//(float) to avoid warning of conversion.
+	foodBounds = {(float)food.position.x * CELL_SIZE, (float) food.position.y * CELL_SIZE, CELL_SIZE, CELL_SIZE, WHITE};
+
+	drawRectangle(foodBounds);
+
+	glLine(0, 1, SCREEN_WIDTH_SNAKE, 1, WHITE);
+	glLine(0, SCREEN_HEIGHT_SNAKE - 1, SCREEN_WIDTH_SNAKE, SCREEN_HEIGHT_SNAKE - 1, WHITE);
+	glLine(0, 0, 0, SCREEN_HEIGHT_SNAKE, WHITE);
+	glLine(SCREEN_WIDTH_SNAKE - 1, 0, SCREEN_WIDTH_SNAKE - 1, SCREEN_HEIGHT_SNAKE, WHITE);
+
+	glEnd2D();
+}
+
+void renderBottomScreen()
+{
+	lcdMainOnTop();
+	vramSetBankD(VRAM_D_LCD);
+	vramSetBankC(VRAM_C_SUB_BG);
+	REG_DISPCAPCNT = DCAP_BANK(3) | DCAP_ENABLE | DCAP_SIZE(3);
+
+	glBegin2D();
 
 	glColor(RGB15(0, 31, 31));
 
-	// If I put to much text the screen order will get swapped, the top will become bottom
-	// need to be carefull.
-	std::string collisionCounterString = "COUNTER: " + std::to_string(collisionCounter);
+	std::string scoreString = "SCORE: " + std::to_string(score);
 
-	Font.PrintCentered(0, 20, collisionCounterString.c_str());
+	Font.Print(HALF_WIDTH + 40, 20, scoreString.c_str());
+
+	std::string highScoreString = "HIGH: " + std::to_string(highScore);
+
+	Font.Print(20, 20, highScoreString.c_str());
+
+	if (isGamePaused)
+	{
+		Font.PrintCentered(0, HALF_HEIGHT, "GAME PAUSED");
+	}
 
 	glEnd2D();
 }
 
 int main(int argc, char *argv[])
 {
-	// Mode 5: 2 Static layers + 2 Affine Extended layers. This is the most common mode used since it’s incredibly flexible.
-
-	//Set video mode top screen
 	videoSetMode(MODE_5_3D);
 
-	//Set video mode bottom screen
 	videoSetModeSub(MODE_5_2D);
 
-	// init oam to capture 3D scene
 	initSubSprites();
 	mmInitDefaultMem((mm_addr)soundbank_bin);
 
-	// sub background holds the top image when 3D directed to bottom
 	bgInitSub(3, BgType_Bmp16, BgSize_B16_256x256, 0, 0);
 
-	// Initialize GL in 3d mode
 	glScreen2D();
 
-	// Set Bank A to texture (128 kb)
 	vramSetBankA(VRAM_A_TEXTURE);
-	vramSetBankE(VRAM_E_TEX_PALETTE); // Allocate VRAM bank for all the palettes
+	vramSetBankE(VRAM_E_TEX_PALETTE);
 
-	// Load our font texture
-	// We used glLoadSpriteSet since the texture was made
-	// with my texture packer.
-	// no need to save the return value since
-	// we don't need  it at all
-	Font.Load(FontImages,																		  // pointer to glImage array
-			  FONT_SI_NUM_IMAGES,																  // Texture packer auto-generated #define
-			  font_si_texcoords,																  // Texture packer auto-generated array
-			  GL_RGB256,																		  // texture type for glTexImage2D() in videoGL.h
-			  TEXTURE_SIZE_64,																	  // sizeX for glTexImage2D() in videoGL.h
-			  TEXTURE_SIZE_128,																	  // sizeY for glTexImage2D() in videoGL.h
-			  GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T | TEXGEN_OFF | GL_TEXTURE_COLOR0_TRANSPARENT, // param for glTexImage2D() in videoGL.h
-			  256,																				  // Length of the palette (256 colors)
-			  (u16 *)font_siPal,																  // Palette Data
-			  (u8 *)font_siBitmap																  // image data generated by GRIT
-	);
+	Font.Load(FontImages,
+			  FONT_SI_NUM_IMAGES,
+			  font_si_texcoords,
+			  GL_RGB256,
+			  TEXTURE_SIZE_64,
+			  TEXTURE_SIZE_128,
+			  GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T | TEXGEN_OFF | GL_TEXTURE_COLOR0_TRANSPARENT,
+			  256,
+			  (u16 *)font_siPal,
+			  (u8 *)font_siBitmap);
 
-	// Do the same with our bigger texture
 	FontBig.Load(FontBigImages,
 				 FONT_16X16_NUM_IMAGES,
 				 font_16x16_texcoords,
@@ -206,18 +368,6 @@ int main(int argc, char *argv[])
 				 (u16 *)font_siPal,
 				 (u8 *)font_16x16Bitmap);
 
-	// maxmod audio library only support music from mod/it/s3m files extension.
-	// load the module
-	// to load the other music exchange mmload and mmstart with MOD_DARKSTONE
-	mmLoad(MOD_FLATOUTLIES);
-
-	// Start playing module
-	mmStart(MOD_FLATOUTLIES, MM_PLAY_LOOP);
-
-	// set music volume
-	mmSetModuleVolume(200);
-
-	// load sound effects
 	mmLoadEffect(SFX_MAGIC);
 
 	collisionSound = {
@@ -228,59 +378,40 @@ int main(int argc, char *argv[])
 		255,					 // panning
 	};
 
-	// our ever present frame counter
-	int frame = 0;
+	srand(time(NULL));
 
-	touchPosition touch;
+	Vector2 initialFoodPosition = generateRandomPosition();
+
+	food = {CELL_COUNT, CELL_SIZE, initialFoodPosition, false};
+
+	std::deque<Vector2> initialBody = {{6, 9}, {5, 9}, {4, 9}};
+	Vector2 direction = {1, 0};
+
+	snake = {CELL_COUNT, CELL_SIZE, initialBody, direction, false};
+
+	int frame = 0;
 
 	while (true)
 	{
-		// increment frame counter
 		frame++;
-		// get input
+
 		scanKeys();
-
-		// read the touchscreen coordinates
-		touchRead(&touch);
-
-		if (touch.px > 0 && touch.py > 0 && touch.px < SCREEN_WIDTH - bottomBounds.w && touch.py < SCREEN_HEIGHT - bottomBounds.h)
-		{
-			bottomBounds.x = touch.px;
-			bottomBounds.y = touch.py;
-		}
-
-		touchBounds.x = touch.px;
-		touchBounds.y = touch.py;
-
-		if (hasCollision(touchBounds, bottomBounds))
-		{
-			bottomBounds.color = RED;
-		}
-		else
-		{
-			bottomBounds.color = BLUE;
-		}
 
 		int keyDown = keysDown();
 
 		if (keyDown & KEY_START)
 		{
 			isGamePaused = !isGamePaused;
-
 			mmEffectEx(&collisionSound);
 		}
 
 		if (!isGamePaused)
 		{
-			update();
+			update(keyDown);
 		}
 
-		// wait for capture unit to be ready
 		while (REG_DISPCAPCNT & DCAP_ENABLE);
 
-		// Alternate rendering every other frame
-		// Limits your FPS to 30
-		// setting up top and bottom screen
 		if ((frame & 1) == 0)
 		{
 			renderTopScreen();
